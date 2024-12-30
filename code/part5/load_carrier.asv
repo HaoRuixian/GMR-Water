@@ -1,0 +1,96 @@
+function [carrier_data] = load_carrier(app, startdate, enddate, sp3option, station, d)
+global time sp3_type rinex_version station_l station_xyz elv azimask azi station_belong station_name sp3_path obs_path dt
+addpath('functions')
+tdatenum = startdate - 1;
+datastr = strcat(obs_path,'\');
+all_days = daysact(time(1),time(2))+1;
+ok_days = 0;
+% LOAD SNR DATA
+while tdatenum < enddate
+    tdatenum = tdatenum + 1;
+    curdt = datetime(tdatenum,'convertfrom','datenum');%转换为 datetime 数组
+    curjd=juliandate(curdt);%将 MATLAB 日期时间转换为儒略日
+    [gpsw,sow,~] = jd2gps(curjd);%gps周 ；seconds of week since 0 hr, Sun
+    dow = sow/86400;%天
+
+    strday=char(datetime(curdt,'format','DDD'));
+    stryr=char(datetime(curdt,'format','yy'));
+    stryrl=char(datetime(curdt,'format','yyyy'));
+    % rinex version
+    if rinex_version == 'rinex 2'
+        rinex_option = 1;
+    elseif rinex_version == 'rinex 3'
+        rinex_option = 2;
+    end
+    d.Message = strcat('正在提取日期为：',char(curdt),'的数据,',newline,'rinex版本为',rinex_version);
+
+    % for the different way of naming
+    if rinex_option == 1
+        if exist([datastr,'/',station,strday,'0.',stryr,'o'],'file') == 2 % exist
+            obsstr=[datastr,'/',station,strday,'0.',stryr,'o'];
+        else
+            disp('snr data does not exist!')
+            continue
+        end
+    elseif rinex_option == 2
+        if exist([datastr,upper(station),'00',station_belong,'_R_',stryrl,strday,'0000_01D_',num2str(dt),'S_MO.rnx'],'file') == 2
+            obsstr=[datastr,upper(station),'00',station_belong,'_R_',stryrl,strday,'0000_01D_',num2str(dt),'S_MO.rnx'];
+        elseif exist([datastr,'/',station,strday,'0.',stryr,'o'],'file')
+            obsstr=[datastr,'/',station,strday,'0.',stryr,'o'];
+        else
+            disp('snr data does not exist!')
+            continue
+        end
+    end
+    % the different precision ephemeris mechanism
+    if sp3option == 'com'
+        % OPTION 1
+        sp3str = [sp3_path,'com',num2str(gpsw),num2str(round(dow)),'.sp3'];
+    elseif sp3option == 'igs'
+        % OPTION 2
+        sp3str=[sp3_path,'\igs',num2str(gpsw),num2str(round(dow)),'.sp3'];
+    elseif sp3option == 'COD'
+        % OPTION 3
+        sp3str=[sp3_path,'COD0MGXFIN_',stryrl,strday,'0000_01D_05M_ORB.SP3'];
+    elseif sp3option == 'GFZ'
+        % OPTION 4
+        sp3str=[sp3_path,'GFZ0MGXRAP_',stryrl,strday,'0000_01D_05M_ORB.SP3'];
+    end
+
+
+    elv_lims = elv;
+    azi_lims = azi;
+    azi_mask = azimask;
+    plat = station_l(2);
+    plon = station_l(1);
+    staxyz = station_xyz;
+    % for the different rinex version
+    if rinex_option == 1
+        [carrier_data] = rinex2snrfile_1(app,obsstr,sp3str,elv_lims,azi_lims,staxyz,plat,plon,d);
+        save([app.path_cpi.Value, '\', station_name, num2str(tdatenum),'.mat'],'carrier_data');
+    elseif rinex_option == 2
+        [carier_azi, carrier_all ,carrier_data] = rinex2carrier_2(app,obsstr,sp3str,elv_lims,azi_lims,azi_mask,staxyz,plat,plon,d,all_days);
+        if string(app.type.Value) == "载波相位"
+            save([app.path_cpi.Value, '\', station_name, num2str(tdatenum),'.mat'],'carrier_data');
+            save([app.path_cpi.Value, '\', station_name, num2str(tdatenum),'unselected.mat'],'carrier_all');
+            save([app.path_cpi.Value, '\', station_name, num2str(tdatenum),'azi.mat'],'carier_azi');
+        elseif string(app.type.Value) == "伪距"
+            pseudorange_data = carrier_data;
+            pseudorange_all = carrier_all;
+            pseudorange_azi = carier_azi;
+            save([app.path_cpi.Value, '\', station_name, num2str(tdatenum),'.mat'],'pseudorange_data');
+            save([app.path_cpi.Value, '\', station_name, num2str(tdatenum),'unselected.mat'],'pseudorange_all');
+            save([app.path_cpi.Value, '\', station_name, num2str(tdatenum),'azi.mat'],'pseudorange_azi');
+        end
+    end
+    
+%     app.path_SNR_2.Value = app.path_SNR_1.Value;
+    clear slvlr lspy
+    % progress
+    ok_days = ok_days+1;
+    progress_day = strcat('(',num2str(ok_days),'/',num2str(all_days),')');
+    d.Title = strcat('提取进度 ',progress_day);
+    d.Value = ok_days / all_days;
+
+end
+end

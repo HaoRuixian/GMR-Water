@@ -1,0 +1,396 @@
+function [carrier_azi, carrier_all , carrier_data] = rinex2carrier_2(app,obsstr, sp3str, elv_lims, azi_lims, azi_mask, staxyz, plat, plon,d,all_days)
+
+global  dt
+addpath 'functions'
+pace = 1/all_days;
+GNSS_num = 0;
+data = rinexread(obsstr);
+d.Message = strcat('观测文件',obsstr,'已提取完成');
+[txyz,xyz] = readsp3file(sp3str);
+txyzsecs=txyz-txyz(1);
+txyzsecs=txyzsecs.*86400;
+if ~isa(dt,'double')
+    dts = str2double(dt);
+end
+secs = 0:dts:86385;
+[satind,~,~] = size(xyz);
+for i = 1:satind
+    if isnan(squeeze(xyz(i,:,1)))
+        continue
+    end
+    xyzt(:,1,i) = spline(txyzsecs,squeeze(xyz(i,:,1)),secs);
+    xyzt(:,2,i) = spline(txyzsecs,squeeze(xyz(i,:,2)),secs);
+    xyzt(:,3,i) = spline(txyzsecs,squeeze(xyz(i,:,3)),secs);
+end
+d.Message = ['观测文件' obsstr '已提取完成'  newline  '精密星历'  sp3str  '已提取完成'  newline  '开始解析GPS数据……'];
+clear xyz
+
+% if string(app.type.Value) == "载波相位"
+%     ty = 'L';
+% elseif string(app.type.Value) == "伪距"
+%     ty = 'C';
+% end
+ty1 =
+%% for GPS
+if isfield(data,'GPS')
+    GNSS_num = GNSS_num+1;
+    GPS_data = data.GPS;
+    error_num = table2array(GPS_data(:,'EpochFlag'));
+    error_ind = error_num~=0;% error indx
+    band = GPS_data.Properties.VariableNames;
+    [~,hang] = size(band); % number of carrier
+    ind = 1;
+    for i = 4:hang
+        var = char(band(i));
+        [~,len] = size(var);
+        if var(1) == ty && len < 4 %carrier value
+            GPS_data_carrier(:,ind) = table2array(GPS_data(:,var));
+            list(ind,:) = var;
+            ind = ind+1;
+        end
+    end
+
+    GPS_data_prn_num = table2array(GPS_data(:,1));
+    GPS_data_prn_str = strcat('G',num2str(GPS_data_prn_num));
+    GPS_data_time = GPS_data.Time;
+    X = convertTo(GPS_data_time,'posixtime');
+    GPS_data_time = X - X(1);
+    [all_ok,~] = size(GPS_data_time);
+    l = d.Value;
+    d.Message = ['观测文件',obsstr,'已提取完成',newline,'精密星历',sp3str,'已提取完成',newline,'开始解析GPS数据……',newline,'GPS的数据已分离完成，开始计算并筛选高度角与方位角……'];
+    ind = 1;
+    bool = 0;
+
+    for j = 1:numel(secs)
+        time_indx = GPS_data_time==secs(j);
+        satnum = GPS_data_prn_num(time_indx); % the prn number in this time
+        for satindx = 1:numel(satnum)
+            satindx_num = satnum(satindx);
+            if error_ind(ind) ~= 0
+                ind = ind+1;
+            end
+
+            if (secs(j) == GPS_data_time(ind) && satindx_num == GPS_data_prn_num(ind))
+                [azi,elv] = gnss2azelv(staxyz,xyzt(j,:,satindx_num),plat,plon);
+                GPS_azi(ind,1) = azi;
+                GPS_elv(ind,1) = elv;
+                ind = ind + 1;
+                d.Value = (ind/all_ok)*(1/4)*pace + l;
+                if ind > numel(GPS_data_time)
+                    bool = 1;
+                    break
+                end
+            end
+
+        end
+        if bool == 1
+            break
+        end
+    end
+    data_carrier = table(GPS_data_prn_num,GPS_data_time,GPS_azi,GPS_elv);
+    [l,~] = size(list);
+    for i = 5:l+4
+        data_carrier(:,i) = table(GPS_data_carrier(:,i-4));
+    end
+    data_carrier(:,end+1) = table(GPS_data_prn_str);
+    data_carrier.Properties.VariableNames = ['GPS_data_prn_num','GPS_data_time','GPS_azi','GPS_elv',string(list)','GPS_data_prn_str'];
+
+    % azi elv select
+    azi = table2array(data_carrier(:,"GPS_azi"));
+    if isnan(azi_mask)
+        aziok_ind = (azi>azi_lims(1) & azi<azi_lims(2));
+    else
+        aziok_ind = ((azi>azi_lims(1) & azi<azi_mask(1)) | (azi<azi_lims(2) & azi>azi_mask(2)));
+    end
+    GPS_carrier_azi = data_carrier(aziok_ind,:);
+    elv = table2array(GPS_carrier_azi(:,"GPS_elv"));
+    elvok_ind = elv>elv_lims(1) & elv<elv_lims(2);
+    GPS_carrier = GPS_carrier_azi(elvok_ind,:);
+
+    GPS_carrier(:,end) = [];
+    GPS_all = data_carrier;
+    clear data_carrier list
+    d.Message = '数据已筛选完成，开始解析GLONASS数据……';
+
+    carrier_data.GPS = GPS_carrier;
+    carrier_all.GPS = GPS_all;
+    carrier_azi.GPS = GPS_carrier_azi;
+    clear GPS_carrier GPS_all
+end
+%% for GLONASS
+if isfield(data,'GLONASS')
+    GNSS_num = GNSS_num+1;
+    GLONASS_data = data.GLONASS;
+    error_num = table2array(GLONASS_data(:,'EpochFlag'));
+    error_ind = error_num~=0;
+    band = GLONASS_data.Properties.VariableNames;
+    [~,hang] = size(band);
+    ind = 1;
+    for i = 4:hang
+        var = char(band(i));
+        [~,len] = size(var);
+        if var(1) == ty && len == 3
+            GLONASS_data_carrier(:,ind) = table2array(GLONASS_data(:,var));
+            list(ind,:) = var;
+            ind = ind+1;
+        end
+    end
+    GLONASS_data_prn_num = table2array(GLONASS_data(:,1));
+    GLONASS_data_prn_str = strcat('R',num2str(GLONASS_data_prn_num));
+    GLONASS_data_time = GLONASS_data.Time;
+    X = convertTo(GLONASS_data_time,'posixtime');
+    GLONASS_data_time = X - X(1);
+    [all_ok,~] = size(GLONASS_data_time);
+    ind = 1;
+    bool = 0;
+    l = d.Value;
+    d.Message = ['天空图生成完成，开始解析GLONASS数据……',newline,'GLONASS的数据已分离完成，开始计算并筛选高度角与方位角……'];
+    for j = 1:numel(secs)
+        time_indx = GLONASS_data_time==secs(j);
+        satnum = GLONASS_data_prn_num(time_indx);
+        for satindx = 1:numel(satnum)
+            satindx_num = satnum(satindx);
+
+            if error_ind(ind) ~= 0
+                ind = ind+1;
+            end
+
+            if (secs(j) == GLONASS_data_time(ind) && satindx_num == GLONASS_data_prn_num(ind))
+                [azi,elv] = gnss2azelv(staxyz,xyzt(j,:,satindx_num+32),plat,plon);
+                GLONASS_azi(ind,1) = azi;
+                GLONASS_elv(ind,1) = elv;
+                ind = ind + 1;
+                d.Value = (ind/all_ok)*(1/4)*pace + l;
+                if ind > numel(GLONASS_data_time)
+                    bool = 1;
+                    break
+                end
+            end
+
+            if ind > numel(GLONASS_data_time)
+                bool = 1;
+                break
+            end
+        end
+        if bool == 1
+            break
+        end
+    end
+    data_carrier = table(GLONASS_data_prn_num,GLONASS_data_time,GLONASS_azi,GLONASS_elv);
+    [l,~] = size(list);
+    for i = 5:l+4
+        data_carrier(:,i) = table(GLONASS_data_carrier(:,i-4));
+    end
+    data_carrier(:,end+1) = table(GLONASS_data_prn_str);
+    data_carrier.Properties.VariableNames = ['GLONASS_data_prn_num','GLONASS_data_time','GLONASS_azi','GLONASS_elv',string(list)',"GLONASS_data_prn_str"];
+
+    % azi elv select
+    azi = table2array(data_carrier(:,"GLONASS_azi"));
+    if isnan(azi_mask)
+        aziok_ind = (azi>azi_lims(1) & azi<azi_lims(2));
+    else
+        aziok_ind = ((azi>azi_lims(1) & azi<azi_mask(1)) | (azi<azi_lims(2) & azi>azi_mask(2)));
+    end
+    GLONASS_carrier_azi = data_carrier(aziok_ind,:);
+    elv = table2array(GLONASS_carrier_azi(:,"GLONASS_elv"));
+    elvok_ind = elv>elv_lims(1) & elv<elv_lims(2);
+    GLONASS_carrier = GLONASS_carrier_azi(elvok_ind,:);
+
+
+    GLONASS_carrier(:,end) = [];
+    GLONASS_all = data_carrier;
+    clear data_carrier list
+    d.Message = '数据已筛选完成，开始解析GALILEO数据……';
+
+    carrier_data.GLONASS = GLONASS_carrier;
+    carrier_all.GLONASS = GLONASS_all;
+    carrier_azi.GLONASS = GLONASS_carrier_azi;
+    clear GLONASS_carrier GLONASS_all
+end
+%% for GALILEO
+if isfield(data,'Galileo')
+    GNSS_num = GNSS_num+1;
+    GALILEO_data = data.Galileo;
+    error_num = table2array(GALILEO_data(:,'EpochFlag'));
+    error_ind = error_num~=0;
+    band = GALILEO_data.Properties.VariableNames;
+    [~,hang] = size(band);
+    ind = 1;
+    for i = 4:hang
+        var = char(band(i));
+        [~,len] = size(var);
+        if var(1) == ty && len == 3
+            GALILEO_data_carrier(:,ind) = table2array(GALILEO_data(:,var));
+            list(ind,:) = var;
+            ind = ind+1;
+        end
+    end
+    GALILEO_data_prn_num = table2array(GALILEO_data(:,1));
+    GALILEO_data_prn_str = strcat('E',num2str(GALILEO_data_prn_num));
+    GALILEO_data_time = GALILEO_data.Time;
+    X = convertTo(GALILEO_data_time,'posixtime');
+    GALILEO_data_time = X - X(1);
+    ind = 1;
+    bool = 0;
+    l = d.Value;
+    [all_ok,~] = size(GALILEO_data_time);
+    d.Message = ['天空图生成完成，开始解析GALILEO数据……',newline,'GALILEO的数据已分离完成，开始计算并筛选高度角与方位角……'];
+    for j = 1:numel(secs)
+        time_indx = GALILEO_data_time==secs(j);
+        satnum = GALILEO_data_prn_num(time_indx);
+        for satindx = 1:numel(satnum)
+            satindx_num = satnum(satindx);
+
+            if error_ind(ind) ~= 0
+                ind = ind+1;
+            end
+
+            if (secs(j) == GALILEO_data_time(ind) && satindx_num == GALILEO_data_prn_num(ind))
+                [azi,elv] = gnss2azelv(staxyz,xyzt(j,:,satindx_num+32+24),plat,plon);
+                GALILEO_azi(ind,1) = azi;
+                GALILEO_elv(ind,1) = elv;
+                ind = ind + 1;
+                d.Value = (ind/all_ok)*(1/4)*pace + l;
+                if ind > numel(GALILEO_data_time)
+                    bool = 1;
+                    break
+                end
+            end
+        end
+        if bool == 1
+            break
+        end
+    end
+    data_carrier = table(GALILEO_data_prn_num,GALILEO_data_time,GALILEO_azi,GALILEO_elv);
+
+    [l,~] = size(list);
+    for i = 5:l+4
+        data_carrier(:,i) = table(GALILEO_data_carrier(:,i-4));
+    end
+    data_carrier(:,end+1) = table(GALILEO_data_prn_str);
+    data_carrier.Properties.VariableNames = ['GALILEO_data_prn_num','GALILEO_data_time','GALILEO_azi','GALILEO_elv',string(list)','GALILEO_data_prn_str'];
+
+    % azi elv select
+    azi = table2array(data_carrier(:,"GALILEO_azi"));
+    if isnan(azi_mask)
+        aziok_ind = (azi>azi_lims(1) & azi<azi_lims(2));
+    else
+        aziok_ind = ((azi>azi_lims(1) & azi<azi_mask(1)) | (azi<azi_lims(2) & azi>azi_mask(2)));
+    end
+    GALILEO_carrier_azi = data_carrier(aziok_ind,:);
+    elv = table2array(GALILEO_carrier_azi(:,"GALILEO_elv"));
+    elvok_ind = elv>elv_lims(1) & elv<elv_lims(2);
+    GALILEO_carrier = GALILEO_carrier_azi(elvok_ind,:);
+
+    GALILEO_carrier(:,end) = [];
+    GALILEO_all = data_carrier;
+    clear data_carrier list
+
+    d.Message = '数据已筛选完成，开始解析BDS数据……';
+
+    carrier_data.GALILEO = GALILEO_carrier;
+    carrier_all.GALILEO = GALILEO_all;
+    carrier_azi.GALILEO = GALILEO_carrier_azi;
+    clear GALILEO_carrier GALILEO_all
+end
+%% for BDS
+if isfield(data,'BeiDou')
+    GNSS_num = GNSS_num+1;
+    BDS_data = data.BeiDou;
+    error_num = table2array(BDS_data(:,'EpochFlag'));
+    error_ind = error_num~=0;
+    band = BDS_data.Properties.VariableNames;
+    [~,hang] = size(band);
+    ind = 1;
+    for i = 4:hang
+        var = char(band(i));
+        [~,len] = size(var);
+        if var(1) == ty && len == 3
+            BDS_data_carrier(:,ind) = table2array(BDS_data(:,var));
+            list(ind,:) = var;
+            ind = ind+1;
+        end
+    end
+    BDS_data_prn_num = table2array(BDS_data(:,1));
+    BDS_data_prn_str = strcat('C',num2str(BDS_data_prn_num));
+    BDS_data_time = BDS_data.Time;
+    X = convertTo(BDS_data_time,'posixtime');
+    BDS_data_time = X - X(1);
+    ind = 1;
+    bool = 0;
+    l = d.Value;
+    [all_ok,~] = size(BDS_data_time);
+    d.Message = ['天空图生成完成，开始解析BDS数据……',newline,'BDS的数据已分离完成，开始计算并筛选高度角与方位角……'];
+    for j = 1:numel(secs)
+        time_indx = BDS_data_time==secs(j);
+        satnum = BDS_data_prn_num(time_indx);
+        for satindx = 1:numel(satnum)
+            satindx_num = satnum(satindx);
+
+            if error_ind(ind) ~= 0
+                ind = ind+1;
+            end
+
+            i = 1;
+            if satindx_num>=59
+                i = 0;
+                BDS_azi(ind,1) = nan;
+                BDS_elv(ind,1) = nan;
+                ind = ind + 1;
+                d.Value = (ind/all_ok)*(1/4)*pace*0.98 + l;
+                if ind > numel(BDS_data_time)
+                    bool = 1;
+                    break
+                end
+            end
+            if (secs(j) == BDS_data_time(ind) && satindx_num == BDS_data_prn_num(ind)) && i == 1
+                [azi,elv] = gnss2azelv(staxyz,xyzt(j,:,satindx_num+32+24+36),plat,plon);
+                BDS_azi(ind,1) = azi;
+                BDS_elv(ind,1) = elv;
+                ind = ind + 1;
+                d.Value = ((ind/all_ok)*(1/4)*pace)*0.99 + l;
+                if ind > numel(BDS_data_time)
+                    bool = 1;
+                    break
+                end
+            end
+        end
+        if bool == 1
+            break
+        end
+    end
+    data_carrier = table(BDS_data_prn_num,BDS_data_time,BDS_azi,BDS_elv);
+    [l,~] = size(list);
+    for i = 5:l+4
+        data_carrier(:,i) = table(BDS_data_carrier(:,i-4));
+    end
+    data_carrier(:,end+1) = table(BDS_data_prn_str);
+    data_carrier.Properties.VariableNames = ['BDS_data_prn_num','BDS_data_time','BDS_azi','BDS_elv',string(list)','BDS_data_prn_str'];
+
+    % azi elv select
+    azi = table2array(data_carrier(:,"BDS_azi"));
+    if isnan(azi_mask)
+        aziok_ind = (azi>azi_lims(1) & azi<azi_lims(2));
+    else
+        aziok_ind = ((azi>azi_lims(1) & azi<azi_mask(1)) | (azi<azi_lims(2) & azi>azi_mask(2)));
+    end
+    BDS_carrier_azi = data_carrier(aziok_ind,:);
+    elv = table2array(BDS_carrier_azi(:,"BDS_elv"));
+    elvok_ind = elv>elv_lims(1) & elv<elv_lims(2);
+    BDS_carrier = BDS_carrier_azi(elvok_ind,:);
+
+
+    d.Message = '数据已筛选完成，正在保存数据……';
+    BDS_carrier(:,end) = [];
+    BDS_all = data_carrier;
+    clear data_carrier list
+
+    carrier_data.BDS = BDS_carrier;
+    carrier_all.BDS = BDS_all;
+    carrier_azi.BDS = BDS_carrier_azi;
+    clear BDS_carrier BDS_all
+end
+
+
+d.Value = (GNSS_num/4)*pace ;
+end

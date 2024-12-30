@@ -1,0 +1,10 @@
+function Batch_Callback(app)
+settings.Station_info_file = app.StationfileEditField.Value;
+settings.Rinex_path        = app.RinexpathEditField.Value;
+settings.Rinex_version     = app.RinexversionDropDown.Value;
+settings.Eph_path          = app.EphemerispathEditField.Value;
+settings.AC                = app.ACDropDown.Value;
+settings.Time              = [app.StartdateDatePicker.Value, app.EnddateDatePicker.Value];
+
+main_batch(settings)
+end

@@ -1,0 +1,454 @@
+function [sfacsjs,sfacspre,hinit,xinit,consts_out,roughout] = inversemodel(app,tdatenum,station,snrdir,...
+    kspac,tlen,decimate,satconsts,largetides,roughin,skipjs)
+
+
+%%
+% this code is for inverse modelling of SNR data to get GNSS-R measurements
+% as per Strandberg et al. (2016)
+
+% INPUTS
+% tdatenum: day or time in datenum format
+% station: station identifier string
+% snrdir: path to SNR data, should also be in cellstr format
+% kspac: average node spacing in days (e.g., 2/24 is 2 hours)
+% tlen: length of window for analysis in days, split into 3 and the middle
+% period is saved (e.g., setting to 3 means that the middle day is saved)
+% decimate: decimate input SNR data (in seconds)
+% satconsts: 1 by 3 double, 1 or 0 to include satellite constellations
+% GPS, GLONASSS, GALILEO (e.g., [1 0 1] for GPS and GALILEO)
+% altelvlims: to overwrite the elevation limits in the station input file
+% and use alternate ones, e.g., [5 15] for 5 to 15 degrees
+% largetides: changes the initial guess for node values (1 or 0)
+% roughin: initial sfc roughness guess ('s') in metres for least squares
+% adjustment, set to '' if don't want to use roughness
+% skipjs: skip the least squares adjustment as per strandberg et. al and
+% instead just fit the b-spline curve using spectral analysis estimates
+
+% OUTPUTS
+% these outputs are to go with the function 'invsnr_plot.m'
+% sfacsjs: node values estimated from Strandberg et al. analysis
+% sfacspre: node values estimated by using spectral analysis adjustment
+% hinit: initial spectral analysis estimates
+% xinit: timing of spectral analysis estimates
+% consts_out: the other variables estimated as part of least squares
+% adjustment
+% roughout: the roughness parameter that is estimated in least squares
+% adjustment
+%
+%         Modify By: Ruixian Hao
+%           Contact: Vitamin_N@outlook.com
+%           China University of Mining and Technology-Beijing
+%
+%           Dec 2024
+%--------------------------------------------------------------------------
+
+p = 2; % bspline order, Bezier curve level
+stdfac = 3;
+
+gps = satconsts(1);
+glo = satconsts(2);
+gal = satconsts(3);
+bds = satconsts(4);
+
+global  Operation_settings
+ahgt = app.ahgt.Value;
+ahgt_bounds = app.ahgt_bounds.Value;
+
+if glo == 1
+    load glonasswlen.mat
+end
+
+if decimate ~= 0
+    dt = decimate;
+end
+
+tdatenum = tdatenum-tlen/3;
+% if tdatenum < startdate
+%     tdatenum = start_date;
+% end
+curdt = datetime(tdatenum + tlen/3,'convertfrom','datenum');
+disp(char(curdt))
+
+% work out if need two days or just one
+mlen = 1;
+if tdatenum+tlen - mod(tdatenum+tlen, 1) - (tdatenum-mod(tdatenum,1))>0
+    mlen = tdatenum+tlen - mod(tdatenum+tlen,1)-(tdatenum-mod(tdatenum,1))+1;
+    if mod(tdatenum+tlen,1)==0
+        mlen = mlen-1;
+    end
+end
+
+% AT THIS POINT THE tdatenum AND CURJD ARE THE SAME
+
+% try getting day in order of station first, then after detrended, organise
+% by time, then that's it
+snrfile = [];
+for ll = 1:1
+    snrfilet = [];
+    for m = 1:mlen
+        snrdata = [];
+        % NOW LOADING FROM tdatenum ONWARDS
+        tdatenumt = tdatenum - mod(tdatenum,1) + m-1;
+        curdtt = datetime(tdatenumt,'convertfrom','datenum');
+        strdayt = char(datetime(curdtt,'format','DDD'));
+        stryrst = char(datetime(curdtt,'format','yy'));
+        if exist([char(snrdir),'/', station, num2str(tdatenumt),'.mat'],'file')==2
+            load([char(snrdir),'/', station, num2str(tdatenumt),'.mat'])
+        elseif exist([char(snrdir),'/',station,strdayt,'0.',stryrst,'snr'])==2
+            snr_data = dlmread([char(snrdir),'/',station,strdayt,'0.',stryrst,'snr']);
+        else
+            disp('missing data')
+            miss = 1;
+            break
+        end
+        % get snr matrix From struct
+        for sys = 1:4
+            if sys == 1
+                system = snr_data.GPS;
+                gnss_system = "GPS";
+                add = 0;
+            elseif sys == 2
+                system = snr_data.GLONASS;
+                gnss_system = "GLONASS";
+                add = 32;
+            elseif sys == 3
+                system = snr_data.GALILEO;
+                gnss_system = "GALILEO";
+                add = 32+24;
+            elseif sys == 4
+                system = snr_data.BDS;
+                gnss_system = "BDS";
+                add = 32+24+36;
+            end
+            band_num = size(system.Properties.VariableNames);
+
+            for l = 1: band_num(2)-4
+                band = system.Properties.VariableNames(l+4);
+                bandchar = char(band);
+                if bandchar(2) ~= '1'
+                    continue
+                end
+                [hang,~] = size(system);
+                nan_all = nan(hang ,2);
+                snrfile_raw = [table2array(system(:,1))+add, table2array(system(:,4)),table2array(system(:,3)),table2array(system(:,2)),nan_all,table2array(system(:,band))];
+                [~,lie] = size(snrfile_raw);
+                if lie == 7
+                    snrdata = [snrdata; snrfile_raw];
+                end
+            end
+        end
+        snrdata(:,9) = tdatenum - mod(tdatenum,1)+m-1 + snrdata(:,4)./86400;
+        snrdata(:,10) = ll;
+
+        % now get rid of data outside window
+        tmpout = snrdata(:,9)<tdatenum | snrdata(:,9)>=tdatenum+tlen;
+        snrdata(tmpout,:) = [];
+        snrfilet = [snrfilet; snrdata];
+
+    end
+    if exist('miss')~=0
+        break
+    end
+    snrfile = [snrfile;sortrows(snrfilet,1)];
+    clear snrfilet snr_data
+end
+
+if numel(snrfile)==0
+    disp('no data - continue')
+    sfacsjs=NaN;
+    sfacspre=NaN;
+    hinit=NaN;
+    xinit=NaN;
+    consts_out=NaN;
+    roughout=NaN;
+    return
+end
+
+if decimate~=0
+    modspl = mod(snrfile(:,4),decimate);
+    delt = modspl(:)>0;
+    snrfile(delt,:)=[];
+end
+
+% select elv and azi
+azi_low  = Operation_settings.azi(1);
+azi_high = Operation_settings.azi(2);
+elv_low  = Operation_settings.elv(1);
+elv_high = Operation_settings.elv(2);
+azi_mask = Operation_settings.azimask;
+in = snrfile(:,3)>azi_low & snrfile(:,3)<azi_high;
+snrfile = snrfile(in,:);
+in = snrfile(:,2)<elv_high & snrfile(:,2)>elv_low;
+snrfile=snrfile(in,:);
+if exist('azi_mask')==1
+    out=snrfile(:,3)>azi_mask(1) & snrfile(:,3)<azi_mask(2);
+    snrfile(out,:)=[];
+end
+% grt rid of nan
+tmp = isnan(snrfile(:,7));
+snrfile(tmp,:) = [];
+% change unit
+snrfile(:,7) = sqrt(10.^(snrfile(:,7)./10));
+dtdv = dt/86400;
+
+% getting desired satellite constellations
+if gps==0
+    delete=snrfile(:,1)<32+1;
+    snrfile(delete,:)=[];
+end
+if glo==0
+    delete=snrfile(:,1)>32 & snrfile(:,1)<32+24+1;
+    snrfile(delete,:)=[];
+end
+if gal==0
+    delete=snrfile(:, 1) > 32+24;
+    snrfile(delete,:)=[];
+end
+if bds == 0
+    delete = snrfile(:, 1) > 32+24+36;
+    snrfile(delete,:) = [];
+end
+
+%% NEED TO DETREND SNR DATA
+ind = 1; % line number
+cursat = snrfile(1,1); % sat number
+stind = 1;
+stopp = 1; % stop single
+s1ind = 0;
+sinelv1_all = [];
+snr1_all = [];
+t1_all = [];
+satno_all = [];
+antno_all = [];
+prec1 = 0.001;
+
+if snrfile(2,2)-snrfile(1,2)<0 % Descending order
+    fwd2=0;
+else
+    fwd2=1;
+end
+
+while stopp == 1
+    ind = ind+1;
+    if ind == size(snrfile,1) % last line, end while
+        stopp = 0;
+    end
+
+    if snrfile(ind,2) - snrfile(ind-1,2)<0 % Descending order
+        fwd1 = 0;
+    else
+        fwd1 = 1;
+    end
+
+    curdt = snrfile(ind,9)-snrfile(ind-1,9);
+    if ind - stind > 1
+        if snrfile(ind,1)~=cursat || ind==size(snrfile,1) || abs(curdt)>=3*dtdv...
+                || fwd2~=fwd1 || snrfile(ind,2) == snrfile(ind-1,2) || ind-stopp-stind > (3600/dt) % was 3600
+            if ind-stopp-stind < (300/dt) % was 300 then 1200
+                snrfile(stind:ind-stopp,:) = [];
+                ind = stind;
+            else
+                sinelvt1 = snrfile(stind:ind-stopp, 2);
+                snr1tmp = snrfile(stind:ind-stopp, 7);
+                t1tmp = snrfile(stind:ind-stopp, 9);
+                satnotmp = snrfile(stind:ind-stopp, 1);
+                antnotmp = snrfile(stind:ind-stopp, 10);
+                del = isnan(snr1tmp(:,1))==1;
+                sinelvt1(del,:) = [];
+
+                if numel(sinelvt1) > 2
+                    sinelvt1 = sind(sinelvt1);
+                    snr1tmp(del,:) = [];
+                    t1tmp(del,:) = [];
+                    satnotmp(del,:) = [];
+                    antnotmp(del,:) = [];
+                    p1 = polyfit(sinelvt1,snr1tmp,2); % detrend
+                    y1 = polyval(p1,sinelvt1);
+                    sinelv1_all = [sinelv1_all;sinelvt1];
+                    snr1tmp = snr1tmp-y1;
+                    snr1_all = [snr1_all; snr1tmp];
+                    t1_all = [t1_all; t1tmp];
+                    satno_all = [satno_all; satnotmp];
+                    antno_all = [antno_all; antnotmp];
+
+                    % TO GET INITIAL H TIME SERIES
+                    if sinelvt1(2,1)-sinelvt1(1,1) < 0 % ensure the sine in ascending sort
+                        sinelvt1 = flipud(sinelvt1);
+                        snr1tmp = flipud(snr1tmp);
+                    end
+                    if snrfile(stind,1) < 33
+                        L1car  = 299792458/1575.42e06; % for GPS
+                    elseif snrfile(stind,1)>32 && snrfile(stind,1)<57
+                        L1car = glonasswlen(snrfile(stind,1)-32);
+                    elseif snrfile(stind,1)>56 && snrfile(stind,1)<56+36+1
+                        L1car = 299792458/1575.42e06;
+                    elseif snrfile(stind,1)>56+36
+                        L1car = (299792458/1575.42e06);
+                    end
+                    
+                    maxf1 = numel(sinelvt1)/(2*(max(sinelvt1)-min(sinelvt1))); % max frequency
+                    ovs = round(L1car/(2*prec1*(max(sinelvt1)-min(sinelvt1)))); % Overextraction factor 
+
+                    if sum(diff(sinelvt1)>0)==numel(sinelvt1)-1 || sum(diff(sinelvt1)>0)==0
+                        [psd,f] = plomb(snr1tmp,sinelvt1,maxf1,ovs,'normalized');
+                        reflh1 = f.*0.5*L1car;
+                        [~,id] = max(psd(:));
+                        pks = findpeaks(psd);
+                        pks = sort(pks); % find the max power
+                        skiphere=0;
+                    else
+                        skiphere=1;
+                    end
+
+                    if skiphere == 0
+                        if reflh1(id) > ahgt-ahgt_bounds && reflh1(id) < ahgt+ahgt_bounds % in the range
+                            s1ind=s1ind+1;
+                            hinit(s1ind) = reflh1(id);
+                            xinit(s1ind) = mean(t1tmp); % timing of spectral analysis estimates
+                            snr_datatmp = snrfile(stind:ind-stopp,:);
+                            tanthter(s1ind) = tand(mean(snr_datatmp(:,2)))/(((pi/180)*...
+                                (snr_datatmp(end,2)-snr_datatmp(1,2)))...
+                                /((snr_datatmp(end,9)-snr_datatmp(1,9))*86400));
+                            siteinit(s1ind) = snr_datatmp(end,10);
+                        end
+                    end
+                end
+            end
+            stind=ind;
+            if ind<size(snrfile,1)
+                cursat=snrfile(ind,1);
+            end
+        end
+    end
+    fwd2 = fwd1;
+end
+
+if min(t1_all) > tdatenum+tlen/3 || numel(xinit) < 2
+    disp('not enough data - continue')
+    sfacsjs=NaN;
+    sfacspre=NaN;
+    hinit=NaN;
+    xinit=NaN;
+    consts_out=NaN;
+    roughout=NaN;
+    return
+end
+
+meanhgts=0;
+tmpinit = [xinit.' hinit.' tanthter.' siteinit.']; % time, reflect h
+tmpinit = sortrows(tmpinit,1); % sort by time
+xinit = tmpinit(:,1);
+hinit = tmpinit(:,2);
+tanthter = tmpinit(:,3);
+siteinit = tmpinit(:,4);
+% get rid of outlines by 3*sigma
+hsmooth = smoothdata(hinit,'movmean',5);
+diff1 = abs(hsmooth-hinit);
+std1 = std(diff1);
+delete = diff1(:,1)>stdfac*std1; % 2 for 4 stations
+hinit(delete)=[];
+xinit(delete)=[];
+tanthter(delete)=[];
+siteinit(delete)=[];
+
+if largetides == 0
+    indt = t1_all(:)>tdatenum+tlen/3 & t1_all(:)<tdatenum+2*tlen/3;
+    t1_allt = t1_all(indt);
+    maxt1gap = max(diff(sort(t1_allt)));
+else
+    indt = xinit(:)>tdatenum+tlen/3 & xinit(:)<tdatenum+2*tlen/3;
+    indt = find(indt);% find time in window
+    if min(indt)~=1
+        indt = [min(indt)-1 ;indt];
+    end
+    if max(indt)~=numel(xinit)
+        indt = [indt;max(indt)+1];
+    end
+    xinitt = xinit(indt);
+    maxt1gap = max(diff(sort(xinitt)));
+end
+disp(['max gap is ',num2str(maxt1gap*24*60),' minutes'])
+
+
+if  numel(maxt1gap)==0 || maxt1gap>kspac ||...
+        max(xinit)<tdatenum+2*tlen/3 || min(xinit)>tdatenum+tlen/3
+    disp('gap in data bigger than node spacing')
+    disp('continue with risk of instabilities')
+end
+
+knots = [tdatenum*ones(1,p) ...
+    tdatenum:kspac:tdatenum+tlen ...
+    (tdatenum+tlen)*ones(1,p)]; % knot vector, multiplicity = 4
+nsfac = tlen/kspac + p;
+sfacs_0 = ahgt*ones(1,nsfac); % control points
+tempfun_init = @(sfacs) bspline_spectral(sfacs, p, knots, tanthter, xinit,1)-hinit.';
+options = optimoptions(@lsqnonlin,'Algorithm','levenberg-marquardt',...
+    'Display','off'); % off for now but maybe should check sometimes
+sfacs_init = lsqnonlin(tempfun_init,sfacs_0,[],[],options); %lsqnonlin or fsolve??
+in = xinit(:)>tdatenum+tlen/3 & xinit(:)<tdatenum+2*tlen/3;
+xinit = xinit(in).';
+hinit = hinit(in).';
+sfacspre = sfacs_init; % spectral analysis adjustment
+
+if skipjs == 0
+    doprev=0;
+    if exist('sfacsjs')==0 || doprev==0
+        if largetides == 1
+            sfacs_0 = sfacs_init; % estimate b-spline nodes using the initial time series of hs
+        else
+            sfacs_0 = median(hinit)*ones(size(sfacs_init));
+        end
+    else
+        inds = tlen/(3*kspac)+2;
+        sfacs_0 = sfacsjs(inds:end);
+        sfacs_0 = [sfacs_0(1)*ones(1,p-1) sfacs_0 sfacs_0(end)*ones(1,tlen/(3*kspac)+p-1)];
+    end
+    consts = gps+glo+gal+bds;
+    sfacs_0 = [sfacs_0 zeros(1,consts*2)];
+
+    is_rough = string(app.rough_sw.Value);
+    if is_rough == "On"
+        sfacs_0 = [sfacs_0 roughin]; % add roughness
+        tempfun = @(sfacs) bspline_js(sfacs,t1_all,sinelv1_all,snr1_all,knots,...
+            p,satno_all,gps,glo,gal,bds,antno_all,meanhgts);
+    else
+        tempfun = @(sfacs) bspline_jsnorough(sfacs,t1_all, sinelv1_all, snr1_all, knots,...
+            p,satno_all,gps,glo,gal,bds,antno_all,meanhgts);
+    end
+    options = optimoptions(@lsqnonlin,'Algorithm','levenberg-marquardt', 'Display','off');
+    tic
+    sfacs_ls = lsqnonlin(tempfun,sfacs_0,[],[],options); %lsqnonlin or fsolve??
+    toc
+    disp('****least squares done****')
+
+    % to plot model vs real snr data
+    is_plotmodsnr = string(app.plotmodsnr.Value);
+    if is_plotmodsnr == "On"
+        plotmodsnr = 1;
+    elseif is_plotmodsnr == "Off"
+        plotmodsnr = 0;
+    end
+    if plotmodsnr == 1
+        residout = bsp_snrout(app,sfacs_ls,t1_all,sinelv1_all,snr1_all,knots,...
+            p,satno_all,gps,glo,gal,bds,antno_all,meanhgts,dtdv,elv_low,elv_high);
+    end
+
+    if is_rough == "On"
+        sfacsjs    = sfacs_ls(1:end-consts*2-1);
+        consts_out = sfacs_ls(end-consts*2:end-1);
+        roughout   = sfacs_ls(end);
+    else
+        sfacsjs    = sfacs_ls(1:end-consts*2);
+        consts_out = sfacs_ls(end-consts*2:end);
+        roughout   = NaN;
+    end
+
+else
+    sfacsjs    = sfacspre;
+    consts_out = NaN;
+    roughout   = NaN;
+end
+
+
+end
+
